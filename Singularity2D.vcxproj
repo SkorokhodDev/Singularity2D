@@ -133,6 +133,7 @@
     <ClCompile Include="dependencies\imgui-master\imgui_draw.cpp" />
     <ClCompile Include="dependencies\imgui-master\imgui_tables.cpp" />
     <ClCompile Include="dependencies\imgui-master\imgui_widgets.cpp" />
+    <ClCompile Include="src\calculation.cpp" />
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>
   <ItemGroup>
