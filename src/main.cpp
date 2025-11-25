@@ -25,15 +25,21 @@ constexpr double G = 6.67430e-11;
 
 struct Ray;
 
-void rk4Step(Ray& ray, double dLambda, double rs);
-void eulerStep(Ray& ray, double dLambda, double rs);
 
+void eulerStep(Ray& ray, double dLambda, double rs);
+void rk2Step(Ray& ray, double dLambda, double rs);
+void rk4Step(Ray& ray, double dLambda, double rs);
+void rk4Step_optimized(Ray& ray, double dLambda, double rs);
+
+void geodesicRHS_Raw(const double state[4], double E, double rs, double rhs[4]);
+void geodesicRHS(const Ray& ray, double rhs[4], double rs);
 
 enum class RayIntegral {
     Euler = 0,
     RK2,
     RK4,
     RKF45,
+    Test,
     Count
 };
 
@@ -47,8 +53,9 @@ struct IntegratorSettings {
 IntegratorSettings solversConfig[] = {
     { RayIntegral::Euler, "Euler",  false, {0.0f, 1.0f, 0.0f} }, // Green
     { RayIntegral::RK2,   "RK2",    false, {0.0f, 0.5f, 1.0f} }, // Blue
-    { RayIntegral::RK4,   "RK4",    true,  {1.0f, 1.0f, 1.0f} }, // White
-	{ RayIntegral::RKF45, "RKF45",  false, {1.0f, 0.0f, 1.0f} }  // Purple
+    { RayIntegral::RK4,   "RK4",    false,  {1.0f, 1.0f, 1.0f} }, // White
+	{ RayIntegral::RKF45, "RKF45",  false, {1.0f, 0.0f, 1.0f} },  // Purple
+	{ RayIntegral::Test, "Test",  true, {1.0f, 0.0f, 1.0f} }  // Purple
 };
 
 // --- Structs --- //
@@ -192,14 +199,20 @@ struct Ray {
         if (type == RayIntegral::Euler) {
             eulerStep(*this, dLambda, rs);
         }
+        else if (type == RayIntegral::RK2) {
+            rk2Step(*this, dLambda, rs);
+		}
         else if (type == RayIntegral::RK4) {
             rk4Step(*this, dLambda, rs);
         }
         else if (type == RayIntegral::RKF45) {
             // Для RKF45 мы игнорируем входящий dLambda или используем его как "максимум"
             // Мы вызываем внутреннюю функцию, которая сама обновит this->currentStepSize
-            //rkf45AdaptiveStep(rs);
+            rkf45AdaptiveStep(rs);
         }
+        else if (type == RayIntegral::Test) {
+            rk4Step_optimized(*this, dLambda, rs);
+		}
 
         //dr += d2r * dLambda;
         //dphi += d2phi * dLambda;
@@ -213,9 +226,109 @@ struct Ray {
         // 3) record the trail
         trail.push_back({ float(x), float(y) });
     }
+
+
+    // Реализация адаптивного шага (внешняя обертка)
+    void rkf45AdaptiveStep(double rs) {
+        // Пытаемся сделать шаг. Если ошибка велика, rkf45SingleStep вернет false 
+        // и уменьшит currentStepSize. Мы будем повторять, пока шаг не будет принят.
+
+        // Ограничитель, чтобы не зависнуть, если шаг станет бесконечно малым
+        int maxTries = 15;
+        bool success = false;
+
+        while (!success && maxTries > 0) {
+            success = rkf45SingleStep(currentStepSize, rs);
+            if (!success) {
+                maxTries--;
+            }
+        }
+    }
+
+    // Core of RKF45 (Cash-Karp)
+    bool rkf45SingleStep(double h, double rs) {
+        static const double b21 = 0.2, b31 = 3.0 / 40.0, b32 = 9.0 / 40.0;
+        static const double b41 = 0.3, b42 = -0.9, b43 = 1.2;
+        static const double b51 = -11.0 / 54.0, b52 = 2.5, b53 = -70.0 / 27.0, b54 = 35.0 / 27.0;
+        static const double b61 = 1631.0 / 55296.0, b62 = 175.0 / 512.0, b63 = 575.0 / 13824.0, b64 = 44275.0 / 110592.0, b65 = 253.0 / 4096.0;
+        static const double c1 = 37.0 / 378.0, c3 = 250.0 / 621.0, c4 = 125.0 / 594.0, c6 = 512.0 / 1771.0;
+        static const double dc1 = c1 - 2825.0 / 27648.0, dc3 = c3 - 18575.0 / 48384.0, dc4 = c4 - 13525.0 / 55296.0, dc5 = -277.0 / 14336.0, dc6 = c6 - 0.25;
+
+        double y[4] = { r, phi, dr, dphi };
+        double yTemp[4], k1[4], k2[4], k3[4], k4[4], k5[4], k6[4];
+
+        geodesicRHS_Raw(y, E, rs, k1);
+
+        for (int i = 0; i < 4; i++) yTemp[i] = y[i] + h * (b21 * k1[i]);
+        geodesicRHS_Raw(yTemp, E, rs, k2);
+
+        for (int i = 0; i < 4; i++) yTemp[i] = y[i] + h * (b31 * k1[i] + b32 * k2[i]);
+        geodesicRHS_Raw(yTemp, E, rs, k3);
+
+        for (int i = 0; i < 4; i++) yTemp[i] = y[i] + h * (b41 * k1[i] + b42 * k2[i] + b43 * k3[i]);
+        geodesicRHS_Raw(yTemp, E, rs, k4);
+
+        for (int i = 0; i < 4; i++) yTemp[i] = y[i] + h * (b51 * k1[i] + b52 * k2[i] + b53 * k3[i] + b54 * k4[i]);
+        geodesicRHS_Raw(yTemp, E, rs, k5);
+
+        for (int i = 0; i < 4; i++) yTemp[i] = y[i] + h * (b61 * k1[i] + b62 * k2[i] + b63 * k3[i] + b64 * k4[i] + b65 * k5[i]);
+        geodesicRHS_Raw(yTemp, E, rs, k6);
+
+        // Считаем ошибку
+        double error = 0.0;
+        for (int i = 0; i < 4; i++) {
+            double errI = h * (dc1 * k1[i] + dc3 * k3[i] + dc4 * k4[i] + dc5 * k5[i] + dc6 * k6[i]);
+            error += errI * errI;
+        }
+        error = sqrt(error);
+
+        if (error <= tolerance) { // Шаг принят
+            
+            for (int i = 0; i < 4; i++) y[i] += h * (c1 * k1[i] + c3 * k3[i] + c4 * k4[i] + c6 * k6[i]);
+            r = y[0]; phi = y[1]; dr = y[2]; dphi = y[3];
+
+            // Немного увеличиваем шаг, но не более чем в 5 раз
+            double factor = 0.9 * pow(tolerance / (error + 1e-30), 0.2);
+            if (factor > 5.0) factor = 5.0;
+            currentStepSize *= factor;
+            return true;
+        }
+        else {
+            // Шаг отвергнут, уменьшаем размер
+            double factor = 0.9 * pow(tolerance / (error + 1e-30), 0.25);
+            if (factor < 0.1) factor = 0.1;
+            currentStepSize *= factor;
+            return false;
+        }
+    }
 };
 
 vector<Ray> rays;
+
+// Легкая функция для расчета производных без копирования лучей
+// state[0]=r, state[1]=phi, state[2]=dr, state[3]=dphi
+void geodesicRHS_Raw(const double state[4], double E, double rs, double rhs[4]) {
+    double r = state[0];
+    double dr = state[2];
+    double dphi = state[3];
+
+    double f = 1.0 - rs / r;
+    if (f < 1e-9) f = 1e-9; // Защита от деления на ноль у горизонта
+
+    // dr/dLambda
+    rhs[0] = dr;
+    // dφ/dLambda
+    rhs[1] = dphi;
+
+    // d²r/dLambda²
+    double dt_dLA = E / f;
+    rhs[2] = -(rs / (2.0 * r * r)) * f * (dt_dLA * dt_dLA)
+        + (rs / (2.0 * r * r * f)) * (dr * dr)
+        + (r - rs) * (dphi * dphi);
+
+    // d²φ/dLambda²
+    rhs[3] = -2.0 * dr * dphi / r;
+}
 
 void geodesicRHS(const Ray& ray, double rhs[4], double rs) {
     double r = ray.r;
@@ -241,6 +354,9 @@ void geodesicRHS(const Ray& ray, double rhs[4], double rs) {
     rhs[3] = -2.0 * dr * dphi / r;
 }
 
+
+
+
 void addState(const double a[4], const double b[4], double factor, double out[4]) {
     for (int i = 0; i < 4; i++)
         out[i] = a[i] + b[i] * factor;
@@ -256,23 +372,75 @@ void eulerStep(Ray& ray, double dLambda, double rs) {
     ray.dphi += dLambda * k1[3];
 }
 
+void rk2Step(Ray& ray, double dLambda, double rs) {
+    double y[4] = { ray.r, ray.phi, ray.dr, ray.dphi };
+    double k1[4], k2[4];
+    double yHalf[4];
+
+    // K1: Leaning at the beginning of a step
+    geodesicRHS_Raw(y, ray.E, rs, k1);
+
+    // tentative step towards the middle (h/2)
+    double halfStep = dLambda * 0.5;
+    for (int i = 0; i < 4; i++) {
+        yHalf[i] = y[i] + halfStep * k1[i];
+    }
+
+    // K2
+    geodesicRHS_Raw(yHalf, ray.E, rs, k2);
+
+    ray.r += dLambda * k2[0];
+    ray.phi += dLambda * k2[1];
+    ray.dr += dLambda * k2[2];
+    ray.dphi += dLambda * k2[3];
+}
+
 void rk4Step(Ray& ray, double dLambda, double rs) {
     double y0[4] = { ray.r, ray.phi, ray.dr, ray.dphi };
     double k1[4], k2[4], k3[4], k4[4], temp[4];
 
+    // k1
     geodesicRHS(ray, k1, rs);
     addState(y0, k1, dLambda / 2.0, temp);
+	// k2
     Ray r2 = ray; r2.r = temp[0]; r2.phi = temp[1]; r2.dr = temp[2]; r2.dphi = temp[3];
     geodesicRHS(r2, k2, rs);
-
     addState(y0, k2, dLambda / 2.0, temp);
+	// k3
     Ray r3 = ray; r3.r = temp[0]; r3.phi = temp[1]; r3.dr = temp[2]; r3.dphi = temp[3];
     geodesicRHS(r3, k3, rs);
-
     addState(y0, k3, dLambda, temp);
+	// k4
     Ray r4 = ray; r4.r = temp[0]; r4.phi = temp[1]; r4.dr = temp[2]; r4.dphi = temp[3];
     geodesicRHS(r4, k4, rs);
 
+    ray.r += (dLambda / 6.0) * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]);
+    ray.phi += (dLambda / 6.0) * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
+    ray.dr += (dLambda / 6.0) * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
+    ray.dphi += (dLambda / 6.0) * (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3]);
+}
+
+void rk4Step_optimized(Ray& ray, double dLambda, double rs) {
+    double y[4] = { ray.r, ray.phi, ray.dr, ray.dphi };
+    double k1[4], k2[4], k3[4], k4[4];
+    double yTemp[4];
+
+    // K1
+    geodesicRHS_Raw(y, ray.E, rs, k1);
+
+    // K2
+    for (int i = 0; i < 4; i++) yTemp[i] = y[i] + (dLambda / 2.0) * k1[i];
+    geodesicRHS_Raw(yTemp, ray.E, rs, k2);
+
+    // K3
+    for (int i = 0; i < 4; i++) yTemp[i] = y[i] + (dLambda / 2.0) * k2[i];
+    geodesicRHS_Raw(yTemp, ray.E, rs, k3);
+
+    // K4
+    for (int i = 0; i < 4; i++) yTemp[i] = y[i] + dLambda * k3[i];
+    geodesicRHS_Raw(yTemp, ray.E, rs, k4);
+
+    // Итог
     ray.r += (dLambda / 6.0) * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]);
     ray.phi += (dLambda / 6.0) * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
     ray.dr += (dLambda / 6.0) * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
