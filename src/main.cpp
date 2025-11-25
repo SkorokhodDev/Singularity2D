@@ -25,16 +25,38 @@ constexpr double G = 6.67430e-11;
 
 struct Ray;
 
-void rk4Step(Ray& ray, double dLA, double rs);
-void eulerStep(Ray& ray, double dLA, double rs);
+void rk4Step(Ray& ray, double dLambda, double rs);
+void eulerStep(Ray& ray, double dLambda, double rs);
 
+
+enum class RayIntegral {
+    Euler = 0,
+    RK2,
+    RK4,
+    RKF45,
+    Count
+};
+
+struct IntegratorSettings {
+    RayIntegral type;
+    const char* name; // ("Euler")
+    bool enabled;
+    float color[3];   // RGB (0..1) for ImGui
+};
+
+IntegratorSettings solversConfig[] = {
+    { RayIntegral::Euler, "Euler",  false, {0.0f, 1.0f, 0.0f} }, // Green
+    { RayIntegral::RK2,   "RK2",    false, {0.0f, 0.5f, 1.0f} }, // Blue
+    { RayIntegral::RK4,   "RK4",    true,  {1.0f, 1.0f, 1.0f} }, // White
+	{ RayIntegral::RKF45, "RKF45",  false, {1.0f, 0.0f, 1.0f} }  // Purple
+};
 
 // --- Structs --- //
 struct Engine {
 
     GLFWwindow* window;
-    int WIDTH = 1200;
-    int HEIGHT = 800;
+    int WIDTH = 1600;
+    int HEIGHT = 1200;
     float width = 100000000000.0f; // Width of the viewport in meters
     float height = 75000000000.0f; // Height of the viewport in meters
 
@@ -124,6 +146,8 @@ BlackHole SagA(vec3(0.0f, 0.0f, 0.0f), 8.54e36); // Sagittarius A black hole
 
 
 struct Ray {
+	// -- Ray type -- //
+	RayIntegral type = RayIntegral::RK4;
     // -- cartesian coords -- //
     double x;   double y;
     // -- polar coords -- //
@@ -132,7 +156,14 @@ struct Ray {
     vector<vec2> trail; // trail of points
     double E, L;             // conserved quantities
 
-    Ray(vec2 pos, vec2 dir) : x(pos.x), y(pos.y), r(sqrt(pos.x* pos.x + pos.y * pos.y)), phi(atan2(pos.y, pos.x)), dr(dir.x), dphi(dir.y) {
+	vec3 trailColor = vec3(1.0f, 1.0f, 1.0f); // default white
+
+	// Adaptive step size control variables (for RKF45)
+    double currentStepSize = 1.0; 
+    double tolerance = 1e-5;
+
+	Ray(vec2 pos, vec2 dir, RayIntegral type, vec3 trailColor) : x(pos.x), y(pos.y), type{ type }, trailColor{ trailColor },
+        r(sqrt(pos.x* pos.x + pos.y * pos.y)), phi(atan2(pos.y, pos.x)), dr(dir.x), dphi(dir.y) {
         // step 1) get polar coords (r, phi) :
         this->r = sqrt(x * x + y * y);
         this->phi = atan2(y, x);
@@ -151,53 +182,29 @@ struct Ray {
         trail.push_back({ x, y });
     }
 
-    void draw(const std::vector<Ray>& rays, float rayPointSize) {
-        // draw current ray positions as points
-        glPointSize(rayPointSize);
-        glColor3f(1.0f, 0.0f, 0.0f);
-        glBegin(GL_POINTS);
-        for (const auto& ray : rays) {
-            glVertex2f(ray.x, ray.y);
-        }
-        glEnd();
 
-        // turn on blending for the trails
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glLineWidth(1.0f);
 
-        // draw each trail with fading alpha
-        for (const auto& ray : rays) {
-            size_t N = ray.trail.size();
-            if (N < 2) continue;
-
-            glBegin(GL_LINE_STRIP);
-            for (size_t i = 0; i < N; ++i) {
-                // older points (i=0) get alpha≈0, newer get alpha≈1
-                float alpha = float(i) / float(N - 1);
-                glColor4f(1.0f, 1.0f, 1.0f, std::max(alpha, 0.05f));
-                glVertex2f(ray.trail[i].x, ray.trail[i].y);
-            }
-            glEnd();
-        }
-
-        glDisable(GL_BLEND);
-    }
-
-    void step(double dLA, double rs) {
-        
-        if (engine.bProcessing == false) 
-            return;
-
+    void step(double dLambda, double rs)
+    {
         // 1) integrate (r,φ,dr,dφ)
         if (r <= rs) return; // stop if inside the event horizon
-        rk4Step(*this, dLA, rs);
-		//eulerStep(*this, dLA, rs);
 
-		//dr += d2r * dLA;
-		//dphi += d2phi * dLA;
-		//r += dr * dLA;
-		//phi += dphi * dLA;
+        if (type == RayIntegral::Euler) {
+            eulerStep(*this, dLambda, rs);
+        }
+        else if (type == RayIntegral::RK4) {
+            rk4Step(*this, dLambda, rs);
+        }
+        else if (type == RayIntegral::RKF45) {
+            // Для RKF45 мы игнорируем входящий dLambda или используем его как "максимум"
+            // Мы вызываем внутреннюю функцию, которая сама обновит this->currentStepSize
+            //rkf45AdaptiveStep(rs);
+        }
+
+        //dr += d2r * dLambda;
+        //dphi += d2phi * dLambda;
+        //r += dr * dLambda;
+        //phi += dphi * dLambda;
 
         // 2) convert back to cartesian x,y
         x = r * cos(phi);
@@ -218,19 +225,19 @@ void geodesicRHS(const Ray& ray, double rhs[4], double rs) {
 
     double f = 1.0 - rs / r;
 
-    // dr/dLA = dr
+    // dr/dLambda = dr
     rhs[0] = dr;
-    // dφ/dLA = dphi
+    // dφ/dLambda = dphi
     rhs[1] = dphi;
 
-    // d²r/dLA² from Schwarzschild null geodesic:
+    // d²r/dLambda² from Schwarzschild null geodesic:
     double dt_dLA = E / f;
     rhs[2] =
         -(rs / (2 * r * r)) * f * (dt_dLA * dt_dLA)
         + (rs / (2 * r * r * f)) * (dr * dr)
         + (r - rs) * (dphi * dphi);
 
-    // d²φ/dLA² = -2*(dr * dphi) / r
+    // d²φ/dLambda² = -2*(dr * dphi) / r
     rhs[3] = -2.0 * dr * dphi / r;
 }
 
@@ -239,57 +246,69 @@ void addState(const double a[4], const double b[4], double factor, double out[4]
         out[i] = a[i] + b[i] * factor;
 }
 
-void eulerStep(Ray& ray, double dLA, double rs) {
+void eulerStep(Ray& ray, double dLambda, double rs) {
     double k1[4];
     geodesicRHS(ray, k1, rs);
 
-    ray.r += dLA * k1[0];
-    ray.phi += dLA * k1[1];
-    ray.dr += dLA * k1[2];
-    ray.dphi += dLA * k1[3];
+    ray.r += dLambda * k1[0];
+    ray.phi += dLambda * k1[1];
+    ray.dr += dLambda * k1[2];
+    ray.dphi += dLambda * k1[3];
 }
 
-void rk4Step(Ray& ray, double dLA, double rs) {
+void rk4Step(Ray& ray, double dLambda, double rs) {
     double y0[4] = { ray.r, ray.phi, ray.dr, ray.dphi };
     double k1[4], k2[4], k3[4], k4[4], temp[4];
 
     geodesicRHS(ray, k1, rs);
-    addState(y0, k1, dLA / 2.0, temp);
+    addState(y0, k1, dLambda / 2.0, temp);
     Ray r2 = ray; r2.r = temp[0]; r2.phi = temp[1]; r2.dr = temp[2]; r2.dphi = temp[3];
     geodesicRHS(r2, k2, rs);
 
-    addState(y0, k2, dLA / 2.0, temp);
+    addState(y0, k2, dLambda / 2.0, temp);
     Ray r3 = ray; r3.r = temp[0]; r3.phi = temp[1]; r3.dr = temp[2]; r3.dphi = temp[3];
     geodesicRHS(r3, k3, rs);
 
-    addState(y0, k3, dLA, temp);
+    addState(y0, k3, dLambda, temp);
     Ray r4 = ray; r4.r = temp[0]; r4.phi = temp[1]; r4.dr = temp[2]; r4.dphi = temp[3];
     geodesicRHS(r4, k4, rs);
 
-    ray.r += (dLA / 6.0) * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]);
-    ray.phi += (dLA / 6.0) * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
-    ray.dr += (dLA / 6.0) * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
-    ray.dphi += (dLA / 6.0) * (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3]);
+    ray.r += (dLambda / 6.0) * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]);
+    ray.phi += (dLambda / 6.0) * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
+    ray.dr += (dLambda / 6.0) * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
+    ray.dphi += (dLambda / 6.0) * (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3]);
 }
 
 
-void initializeRays()
+void createRays(int numRays, double x0, double yMin, double yMax, RayIntegral type, vec3 rayColor)
 {
-    //rays.push_back(Ray(vec2(-1e11, 3.27606302719999999e10), vec2(c, 0.0f)));
-	rays.clear();
-
-    int numRays = 30;
-    double x0 = -1e11;
-    double yMin = -8e10;
-    double yMax = 8e10;
-
     for (int i = 0; i < numRays; ++i) {
         double y = yMin + (yMax - yMin) * i / (numRays - 1);
         vec2 pos = vec2((float)x0, (float)y);
         vec2 dir = vec2((float)c, 0.0f);
-        rays.push_back(Ray(pos, dir));
+        rays.push_back(Ray(pos, dir, type, rayColor));
     }
 }
+
+void initializeRays() {
+    //rays.push_back(Ray(vec2(-1e11, 3.27606302719999999e10), vec2(c, 0.0f)));
+    rays.clear();
+
+    int numRays = 30; // Или брать из UI
+    double x0 = -1e11;
+    double yMin = -8e10;
+    double yMax = 8e10;
+
+
+    for (const auto& setting : solversConfig) {
+        if (setting.enabled) {
+            vec3 colorVec(setting.color[0], setting.color[1], setting.color[2]);
+
+            createRays(numRays, x0, yMin, yMax, setting.type, colorVec);
+        }
+    }
+}
+
 
 struct UserInterface {
 
@@ -342,8 +361,30 @@ struct UserInterface {
 
             ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io->Framerate, io->Framerate);
 
+            ImGui::Separator();
+            ImGui::Text("Integration Methods:");
+
+            for (int i = 0; i < (int)RayIntegral::Count; i++) {
+                auto& setting = solversConfig[i];
+
+                // Important: Unique ID for each loop pass
+                ImGui::PushID(i);
+
+                ImGui::AlignTextToFramePadding();
+                ImGui::Checkbox(setting.name, &setting.enabled);
+
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(50);
+                ImGui::ColorEdit3("##color", setting.color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+
+                ImGui::PopID();
+            }
+
+            ImGui::Separator();
+
+
             if (ImGui::Button("Reset Rays")) {
-                initializeRays();
+				initializeRays(); 
             }
             if (ImGui::Button("Start")) {
                 engine.bProcessing = true;
@@ -372,6 +413,39 @@ struct UserInterface {
 
 UserInterface ui;
 
+
+void renderRays(const std::vector<Ray>& rays, float pointSize) {
+    if (rays.empty()) return;
+
+    // 1. Points
+    glPointSize(pointSize);
+    glColor3f(1.0f, 0.0f, 0.0f);
+    glBegin(GL_POINTS);
+    for (const auto& ray : rays) {
+        glVertex2f(ray.x, ray.y);
+    }
+    glEnd();
+
+    // 2. Trails
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glLineWidth(1.0f);
+
+    for (const auto& ray : rays) {
+        size_t N = ray.trail.size();
+        if (N < 2) continue;
+
+        glBegin(GL_LINE_STRIP);
+        for (size_t i = 0; i < N; ++i) {
+            float alpha = float(i) / float(N - 1);
+            glColor4f(ray.trailColor.x, ray.trailColor.y, ray.trailColor.z, std::max(alpha, 0.05f));
+            glVertex2f(ray.trail[i].x, ray.trail[i].y);
+        }
+        glEnd();
+    }
+    glDisable(GL_BLEND);
+}
+
 int main() {
 
 	initializeRays();
@@ -380,14 +454,22 @@ int main() {
 		
         ui.start_frame();
 
+        if (engine.bProcessing) {
+			int speedMultiplier = 1;  // amount of steps per frame
+
+            for (int i = 0; i < speedMultiplier; i++) {
+                for (auto& ray : rays) {
+                    // dLambda can be adjusted, 1.0 is usually ok for such scales
+                    ray.step(1.0, SagA.r_s);
+                }
+            }
+        }
+
         // Render
         engine.run();
         SagA.draw(ui.bodyColor);
 
-        for (auto& ray : rays) {
-            ray.step(1.0f, SagA.r_s);
-            ray.draw(rays, ui.rayPointSize);
-        }
+        renderRays(rays, ui.rayPointSize);
 
 		ui.render_frame();
 
