@@ -1,4 +1,6 @@
-﻿#include <GL/glew.h>
+﻿#define _CRT_SECURE_NO_WARNINGS
+
+#include <GL/glew.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -16,6 +18,8 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+
 
 using namespace glm;
 using namespace std;
@@ -77,6 +81,11 @@ struct Engine {
     // App state
 	bool bProcessing = false;
 
+    // Simulation Timer
+    float simulationTime = 0.0f;     
+    float maxSimulationTime = 10.0f;  
+    bool bTimerEnabled = false;
+        
     Engine() {
         if (!glfwInit()) {
             cerr << "Failed to initialize GLFW" << endl;
@@ -482,8 +491,6 @@ struct UserInterface {
 
     ImGuiIO* io = nullptr;
 
-    bool show_demo_window = true;
-    bool show_another_window = false;
     //ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 
 	ImVec4 bodyColor = ImVec4(1.0f, 1.0f, 0.0f, 1.0f);
@@ -509,11 +516,9 @@ struct UserInterface {
         {
             static int counter = 0;
 
-            ImGui::Begin("Hello, world!");                          // Create a window called "Hello, world!" and append into it.
+            ImGui::Begin("Black hole simulation");                          // Create a window called "Hello, world!" and append into it.
 
-            ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
-            ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools storing our window open/close state
-            ImGui::Checkbox("Another Window", &show_another_window);
+            ImGui::Text("Developed by Skorokhod M.M.");
 
             ImGui::Text("Ray point size.");
             ImGui::SliderFloat("float", &rayPointSize, 1.0f, 10.0f);            // Edit 1 float using a slider from 1.0f to 10.0f
@@ -550,9 +555,27 @@ struct UserInterface {
 
             ImGui::Separator();
 
+            // ------------- Timer -----------------
+            ImGui::Text("Simulation Time Settings");
+            ImGui::Checkbox("Enable Limits", &engine.bTimerEnabled);
+            if (engine.bTimerEnabled)
+            {
+                ImGui::DragFloat("Max Time (s)", &engine.maxSimulationTime, 0.1f, 1.0f, 3600.0f);
+
+                float progress = 0.0f;
+                if (engine.maxSimulationTime > 0.0f)
+                    progress = engine.simulationTime / engine.maxSimulationTime;
+
+                char overlay[32];
+                sprintf(overlay, "%.2f / %.2f s", engine.simulationTime, engine.maxSimulationTime);
+                ImGui::ProgressBar(progress, ImVec2(0.0f, 0.0f), overlay);
+            }
+
+            ImGui::Separator();
 
             if (ImGui::Button("Reset Rays")) {
 				initializeRays(); 
+                engine.simulationTime = 0.0f;
             }
             if (ImGui::Button("Start")) {
                 engine.bProcessing = true;
@@ -614,32 +637,50 @@ void renderRays(const std::vector<Ray>& rays, float pointSize) {
     glDisable(GL_BLEND);
 }
 
+
 int main() {
 
-	initializeRays();
+    initializeRays();
+
+    double lastFrameTime = glfwGetTime();
 
     while (!glfwWindowShouldClose(engine.window)) {
-		
+
+        double currentFrameTime = glfwGetTime();
+        double deltaTime = currentFrameTime - lastFrameTime;
+        lastFrameTime = currentFrameTime;
+
         ui.start_frame();
 
         if (engine.bProcessing) {
-			int speedMultiplier = 1;  // amount of steps per frame
 
-            for (int i = 0; i < speedMultiplier; i++) {
-                for (auto& ray : rays) {
-                    // dLambda can be adjusted, 1.0 is usually ok for such scales
-                    ray.step(1.0, SagA.r_s);
+            // --- Timer logic ---
+            if (engine.bTimerEnabled) {
+                engine.simulationTime += (float)deltaTime;
+
+                if (engine.simulationTime >= engine.maxSimulationTime) {
+                    engine.simulationTime = engine.maxSimulationTime; 
+                    engine.bProcessing = false;
+                }
+            }
+            // --- Ray logic ---
+            if (engine.bProcessing) { 
+                int speedMultiplier = 1;
+                for (int i = 0; i < speedMultiplier; i++) {
+                    for (auto& ray : rays) {
+                        ray.step(1.0, SagA.r_s);
+                    }
                 }
             }
         }
 
-        // Render
         engine.run();
+
         SagA.draw(ui.bodyColor);
 
         renderRays(rays, ui.rayPointSize);
 
-		ui.render_frame();
+        ui.render_frame();
 
         glfwSwapBuffers(engine.window);
         glfwPollEvents();
@@ -647,5 +688,4 @@ int main() {
 
     return 0;
 }
-
 
