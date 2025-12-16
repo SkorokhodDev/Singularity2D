@@ -9,6 +9,10 @@
 #include <iostream>
 #define _USE_MATH_DEFINES
 #include <cmath>
+#include <chrono>
+
+
+
 
 // imgui
 #include "../dependencies/imgui-master/imgui.h"
@@ -20,15 +24,15 @@
 #endif
 
 
-
 using namespace glm;
 using namespace std;
 
 constexpr double c = 299792458.0;
 constexpr double G = 6.67430e-11;
 
-struct Ray;
+long long g_physicsCalculations = 0;
 
+struct Ray;
 
 void eulerStep(Ray& ray, double dLambda, double rs);
 void rk2Step(Ray& ray, double dLambda, double rs);
@@ -59,7 +63,7 @@ IntegratorSettings solversConfig[] = {
     { RayIntegral::RK2,   "RK2",    false, {0.0f, 0.5f, 1.0f} }, // Blue
     { RayIntegral::RK4,   "RK4",    false,  {1.0f, 1.0f, 1.0f} }, // White
 	{ RayIntegral::RKF45, "RKF45",  false, {1.0f, 0.0f, 1.0f} },  // Purple
-	{ RayIntegral::Test, "Test",  true, {1.0f, 0.0f, 1.0f} }  // Purple
+	{ RayIntegral::Test, "Test",  true, {0.5f, 0.5f, 1.0f} }
 };
 
 // --- Structs --- //
@@ -70,6 +74,8 @@ struct Engine {
     int HEIGHT = 1200;
     float width = 100000000000.0f; // Width of the viewport in meters
     float height = 75000000000.0f; // Height of the viewport in meters
+
+    float simulationStep = 1.0f; // dLamda
 
     // Navigation state
     float offsetX = 0.0f, offsetY = 0.0f;
@@ -85,6 +91,8 @@ struct Engine {
     float simulationTime = 0.0f;     
     float maxSimulationTime = 10.0f;  
     bool bTimerEnabled = false;
+    // Benchmarking
+    double cpuTimeMs = 0.0;
         
     Engine() {
         if (!glfwInit()) {
@@ -317,6 +325,8 @@ vector<Ray> rays;
 // Легкая функция для расчета производных без копирования лучей
 // state[0]=r, state[1]=phi, state[2]=dr, state[3]=dphi
 void geodesicRHS_Raw(const double state[4], double E, double rs, double rhs[4]) {
+    g_physicsCalculations++;
+
     double r = state[0];
     double dr = state[2];
     double dphi = state[3];
@@ -340,6 +350,8 @@ void geodesicRHS_Raw(const double state[4], double E, double rs, double rhs[4]) 
 }
 
 void geodesicRHS(const Ray& ray, double rhs[4], double rs) {
+    g_physicsCalculations++;
+
     double r = ray.r;
     double dr = ray.dr;
     double dphi = ray.dphi;
@@ -398,8 +410,12 @@ void rk2Step(Ray& ray, double dLambda, double rs) {
     // K2
     geodesicRHS_Raw(yHalf, ray.E, rs, k2);
 
+	///////////////////////// Искажение метода RK2 /////////////////////////
+    double drift = 0.99; 
+    ///////////////////////// Искажение метода RK2 /////////////////////////
+
     ray.r += dLambda * k2[0];
-    ray.phi += dLambda * k2[1];
+	ray.phi += dLambda * k2[1] * drift; // <--- Вот искажение
     ray.dr += dLambda * k2[2];
     ray.dphi += dLambda * k2[3];
 }
@@ -525,14 +541,13 @@ struct UserInterface {
             ImGui::Text("Space body section");
             ImGui::ColorEdit3("color", (float*)&bodyColor); // Edit 3 floats representing a color
 
-            if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
-            {
-                counter++;
-            }
-            ImGui::SameLine();
-            ImGui::Text("counter = %d", counter);
-
+            ImGui::Separator();
+            ImGui::Text("Benchmarking performance: ");
             ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io->Framerate, io->Framerate);
+
+            ImGui::Text("Physics calculations: %lld", g_physicsCalculations);
+
+			ImGui::Text("CPU Time spent in simulation: %.3f ms", engine.cpuTimeMs);
 
             ImGui::Separator();
             ImGui::Text("Integration Methods:");
@@ -572,10 +587,16 @@ struct UserInterface {
             }
 
             ImGui::Separator();
+            ImGui::Text("Simulation Precision");
+            // Слайдер от 1.0 до 20000.0. Чем больше число, тем "грубее" вычисления, но быстрее полет.
+            ImGui::SliderFloat("Step Size (dLambda)", &engine.simulationStep, 1.0f, 10.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+
+            ImGui::Separator();
 
             if (ImGui::Button("Reset Rays")) {
 				initializeRays(); 
                 engine.simulationTime = 0.0f;
+                g_physicsCalculations = 0;
             }
             if (ImGui::Button("Start")) {
                 engine.bProcessing = true;
@@ -629,7 +650,7 @@ void renderRays(const std::vector<Ray>& rays, float pointSize) {
         glBegin(GL_LINE_STRIP);
         for (size_t i = 0; i < N; ++i) {
             float alpha = float(i) / float(N - 1);
-            glColor4f(ray.trailColor.x, ray.trailColor.y, ray.trailColor.z, std::max(alpha, 0.05f));
+            glColor4f(ray.trailColor.x, ray.trailColor.y, ray.trailColor.z, std::max(alpha, 0.7f)); // 0.05
             glVertex2f(ray.trail[i].x, ray.trail[i].y);
         }
         glEnd();
@@ -653,6 +674,7 @@ int main() {
         ui.start_frame();
 
         if (engine.bProcessing) {
+            auto start = std::chrono::high_resolution_clock::now();
 
             // --- Timer logic ---
             if (engine.bTimerEnabled) {
@@ -664,14 +686,17 @@ int main() {
                 }
             }
             // --- Ray logic ---
-            if (engine.bProcessing) { 
-                int speedMultiplier = 1;
-                for (int i = 0; i < speedMultiplier; i++) {
-                    for (auto& ray : rays) {
-                        ray.step(1.0, SagA.r_s);
-                    }
+            int speedMultiplier = 1;
+            for (int i = 0; i < speedMultiplier; i++) {
+                for (auto& ray : rays) {
+                    ray.step(engine.simulationStep, SagA.r_s);
                 }
             }
+            
+
+            auto end = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double, std::milli> diff = end - start;
+            engine.cpuTimeMs += diff.count();
         }
 
         engine.run();
