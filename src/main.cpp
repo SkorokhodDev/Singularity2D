@@ -220,7 +220,7 @@ struct Ray {
             rk2Step(*this, dLambda, rs);
 		}
         else if (type == RayIntegral::RK4) {
-            rk4Step(*this, dLambda, rs);
+            rk4Step_optimized(*this, dLambda, rs);
         }
         else if (type == RayIntegral::RKF45) {
             // Для RKF45 мы игнорируем входящий dLambda или используем его как "максимум"
@@ -228,7 +228,7 @@ struct Ray {
             rkf45AdaptiveStep(rs);
         }
         else if (type == RayIntegral::Test) {
-            rk4Step_optimized(*this, dLambda, rs);
+            rk4Step(*this, dLambda, rs);
 		}
 
         //dr += d2r * dLambda;
@@ -328,6 +328,19 @@ void geodesicRHS_Raw(const double state[4], double E, double rs, double rhs[4]) 
     g_physicsCalculations++;
 
     double r = state[0];
+
+    // --- ИСПРАВЛЕНИЕ (FIX) ---
+    // Если мы пытаемся посчитать физику внутри горизонта событий или очень близко к нему,
+    // мы просто обнуляем все силы. Это предотвращает выстреливание луча.
+    // 1.01 означает 1% от радиуса как буфер безопасности.
+    if (r <= rs * 1.01) {
+        rhs[0] = 0.0;
+        rhs[1] = 0.0;
+        rhs[2] = 0.0;
+        rhs[3] = 0.0;
+        return;
+    }
+
     double dr = state[2];
     double dphi = state[3];
 
@@ -597,6 +610,7 @@ struct UserInterface {
 				initializeRays(); 
                 engine.simulationTime = 0.0f;
                 g_physicsCalculations = 0;
+                engine.cpuTimeMs = 0.0;
             }
             if (ImGui::Button("Start")) {
                 engine.bProcessing = true;
